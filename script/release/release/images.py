@@ -5,7 +5,6 @@ from __future__ import unicode_literals
 import base64
 import json
 import os
-import shutil
 
 import docker
 
@@ -14,9 +13,10 @@ from .utils import ScriptError
 
 
 class ImageManager(object):
-    def __init__(self, version):
+    def __init__(self, version, latest=False):
         self.docker_client = docker.APIClient(**docker.utils.kwargs_from_env())
         self.version = version
+        self.latest = latest
         if 'HUB_CREDENTIALS' in os.environ:
             print('HUB_CREDENTIALS found in environment, issuing login')
             credentials = json.loads(base64.urlsafe_b64decode(os.environ['HUB_CREDENTIALS']))
@@ -26,14 +26,19 @@ class ImageManager(object):
 
     def build_images(self, repository, files):
         print("Building release images...")
-        repository.write_git_sha()
-        distdir = os.path.join(REPO_ROOT, 'dist')
-        os.makedirs(distdir, exist_ok=True)
-        shutil.copy(files['docker-compose-Linux-x86_64'][0], distdir)
-        os.chmod(os.path.join(distdir, 'docker-compose-Linux-x86_64'), 0o755)
-        print('Building docker/compose image')
+        git_sha = repository.write_git_sha()
+        compose_image_base_name = "docker/compose"
+        print('Building {image} image (alpine based)'.format(image=compose_image_base_name))
         logstream = self.docker_client.build(
-            REPO_ROOT, tag='docker/compose:{}'.format(self.version), dockerfile='Dockerfile.run',
+            REPO_ROOT,
+            tag='{image_base_image}:{version}'.format(
+                image_base_image=compose_image_base_name,
+                version=self.version
+            ),
+            buildargs={
+                'GIT_COMMIT': git_sha,
+            },
+            target='build',
             decode=True
         )
         for chunk in logstream:
@@ -42,9 +47,24 @@ class ImageManager(object):
             if 'stream' in chunk:
                 print(chunk['stream'], end='')
 
-        print('Building test image (for UCP e2e)')
+        if self.latest:
+            self.docker_client.tag(
+                '{image}:{tag}'.format(image=compose_image_base_name, tag=self.version),
+                '{image}:{tag}'.format(image=compose_image_base_name, tag='latest')
+            )
+
+        print('Building test image (debian based for UCP e2e)')
+        compose_tests_image_base_name = compose_image_base_name + '-tests'
+        ucp_test_image = '{image}:{tag}'.format(image=compose_tests_image_base_name, tag=self.version)
         logstream = self.docker_client.build(
-            REPO_ROOT, tag='docker-compose-tests:tmp', decode=True
+            REPO_ROOT,
+            tag=ucp_test_image,
+            target='build',
+            buildargs={
+                'BUILD_PLATFORM': 'debian',
+                'GIT_COMMIT': git_sha,
+            },
+            decode=True
         )
         for chunk in logstream:
             if 'error' in chunk:
@@ -52,23 +72,21 @@ class ImageManager(object):
             if 'stream' in chunk:
                 print(chunk['stream'], end='')
 
-        container = self.docker_client.create_container(
-            'docker-compose-tests:tmp', entrypoint='tox'
-        )
-        self.docker_client.commit(container, 'docker/compose-tests', 'latest')
         self.docker_client.tag(
-            'docker/compose-tests:latest', 'docker/compose-tests:{}'.format(self.version)
+            '{image}:{tag}'.format(image=compose_tests_image_base_name, tag=self.version),
+            '{image}:{tag}'.format(image=compose_tests_image_base_name, tag='latest')
         )
-        self.docker_client.remove_container(container, force=True)
-        self.docker_client.remove_image('docker-compose-tests:tmp', force=True)
 
     @property
     def image_names(self):
-        return [
+        images = [
             'docker/compose-tests:latest',
             'docker/compose-tests:{}'.format(self.version),
             'docker/compose:{}'.format(self.version)
         ]
+        if self.latest:
+            images.append('docker/compose:latest')
+        return images
 
     def check_images(self):
         for name in self.image_names:

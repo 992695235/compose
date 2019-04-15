@@ -10,7 +10,7 @@ def buildImage = { String baseImage ->
       try {
         image.pull()
       } catch (Exception exc) {
-        sh """"GIT_COMMIT=$(script/build/write-git-sha) && \\
+        sh """GIT_COMMIT=\$(script/build/write-git-sha) && \\
             docker build -t ${imageName} \\
             --target build \\
             --build-arg BUILD_PLATFORM="${baseImage}" \\
